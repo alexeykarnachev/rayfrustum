@@ -5,6 +5,6 @@ LIBS = -lraylib -lm -lpthread -ldl
 INCLUDES = -I../deps/include -I../include
 
 
-rayfrustum: rayfrustum.c
-	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $^ $(LDFLAGS) $(LIBS)
+rayfrustum: rayfrustum.c ../deps/include/raygizmo.h
+	$(CC) $(CFLAGS) $(INCLUDES) -o rayfrustum rayfrustum.c $(LDFLAGS) $(LIBS)
 

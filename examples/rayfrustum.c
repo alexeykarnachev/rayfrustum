@@ -1,12 +1,19 @@
 #include "../include/rayfrustum.h"
+
 #include "raylib.h"
 #include "raymath.h"
-#include "rlgl.h"
 #include "rcamera.h"
+#include "rlgl.h"
 #include <float.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define RAYGUI_IMPLEMENTATION
+#include "raygui.h"
+
+#define RAYGIZMO_IMPLEMENTATION
+#include "raygizmo.h"
 
 #define SCREEN_WIDTH 1024
 #define SCREEN_HEIGHT 768
@@ -14,6 +21,17 @@
 #define print_vec(v) (printf("%f, %f, %f\n", v.x, v.y, v.z))
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #define max(a, b) (((a) > (b)) ? (a) : (b))
+
+typedef struct DirectionalLight {
+    float azimuth;
+    float attitude;
+} DirectionalLight;
+
+typedef struct CameraShell {
+    Transform transform;
+    Camera3D *camera;
+    Model model;
+} CameraShell;
 
 typedef struct Frustum {
     // near_left_bot, near_left_top, near_right_top, near_right_bot
@@ -39,15 +57,24 @@ typedef struct Triangle {
 
 static Color CLEAR_COLOR = SKYBLUE;
 
-static Vector3 LIGHT_DIRECTION;
+static DirectionalLight LIGHT;
 static Camera3D CAMERA_0;
 static Camera3D CAMERA_1;
+static CameraShell CAMERA_1_SHELL;
 static Model CAMERA_MODEL;
+static RGizmo GIZMO;
 
-static Matrix get_camera_transform(Camera3D camera);
-static Frustum get_frustum_of_camera(Camera3D camera, float aspect, float near, float far);
+static bool IS_CAMERA_PICKED = false;
+
+static CameraShell create_camera_shell(Camera3D *camera);
+static Matrix get_transform_matrix(Transform transform);
+static Frustum get_frustum_of_camera(
+    Camera3D camera, float aspect, float near, float far
+);
 static Frustum get_frustum_of_view_proj(Matrix view, Matrix proj);
-static Frustum get_frustum_of_directional_light(Frustum camera_frustum, Vector3 light_direction);
+static Frustum get_frustum_of_directional_light(
+    Frustum camera_frustum, Vector3 light_direction
+);
 static FrustumsCascade get_frustums_cascade_of_camera(
     Camera3D camera,
     float aspect,
@@ -55,22 +82,26 @@ static FrustumsCascade get_frustums_cascade_of_camera(
     int n_planes
 );
 static FrustumsCascade get_frustums_cascade_of_directional_light(
-    FrustumsCascade camera_frustums_cascade,
-    Vector3 light_direction
+    FrustumsCascade camera_frustums_cascade, Vector3 light_direction
 );
+static Vector3 get_direction_from_azimuth_attitude(float azimuth, float attitude);
 static void update_free_orbit_camera(Camera3D *camera);
+static void draw_camera_shell(CameraShell shell);
 static void draw_frustum(Frustum frustum, Color color);
 static void draw_frustum_wires(Frustum frustum, Color color);
 static void draw_frustums_cascade(FrustumsCascade cascade, Vector3 eye);
 static void draw_frustums_cascade_wires(FrustumsCascade cascade);
+static void draw_gui(void);
 
 int main(void) {
     SetConfigFlags(FLAG_MSAA_4X_HINT);
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "rayfrustum");
     SetTargetFPS(60);
 
-    LIGHT_DIRECTION = Vector3Normalize((Vector3){0.0, 0.0, 1.0});
+    LIGHT.attitude = 45.0;
+    LIGHT.azimuth = 45.0;
     CAMERA_MODEL = LoadModel("./resources/camera.glb");
+    GIZMO = rgizmo_create();
 
     CAMERA_0.fovy = 70.0;
     CAMERA_0.up = (Vector3){0.0, 1.0, 0.0};
@@ -84,56 +115,117 @@ int main(void) {
     CAMERA_1.target = Vector3Add(CAMERA_1.position, (Vector3){0.0, -1.0, 1.0});
     CAMERA_1.projection = CAMERA_PERSPECTIVE;
 
+    CAMERA_1_SHELL = create_camera_shell(&CAMERA_1);
+
     while (!WindowShouldClose()) {
         update_free_orbit_camera(&CAMERA_0);
 
+        if (IS_CAMERA_PICKED) {
+            rgizmo_update(&GIZMO, CAMERA_0, CAMERA_1_SHELL.transform.translation);
+        }
+        CAMERA_1_SHELL.transform.translation = Vector3Add(
+            CAMERA_1_SHELL.transform.translation, GIZMO.update.translation
+        );
+        CAMERA_1_SHELL.transform.rotation = QuaternionMultiply(
+            QuaternionFromAxisAngle(GIZMO.update.axis, GIZMO.update.angle),
+            CAMERA_1_SHELL.transform.rotation
+        );
+
+        CAMERA_1_SHELL.camera->position = CAMERA_1_SHELL.transform.translation;
+        Vector3 dir = Vector3RotateByQuaternion(
+            (Vector3){0.0, 0.0, -1.0}, CAMERA_1_SHELL.transform.rotation
+        );
+        CAMERA_1_SHELL.camera->target = Vector3Add(CAMERA_1_SHELL.camera->position, dir);
+
         float aspect = (float)GetScreenWidth() / GetScreenHeight();
         float planes[4] = {0.01, 2.0, 4.0, 16.0};
-        FrustumsCascade camera_cascade = get_frustums_cascade_of_camera(CAMERA_1, aspect, planes, 4);
-        FrustumsCascade light_cascade = get_frustums_cascade_of_directional_light(camera_cascade, LIGHT_DIRECTION);
-
-        Matrix camera_transform = get_camera_transform(CAMERA_1);
+        FrustumsCascade camera_cascade = get_frustums_cascade_of_camera(
+            CAMERA_1, aspect, planes, 4
+        );
+        FrustumsCascade light_cascade = get_frustums_cascade_of_directional_light(
+            camera_cascade,
+            get_direction_from_azimuth_attitude(LIGHT.azimuth, LIGHT.attitude)
+        );
 
         BeginDrawing();
-        ClearBackground(CLEAR_COLOR);
+        {
+            ClearBackground(CLEAR_COLOR);
 
-        BeginMode3D(CAMERA_0);
-            CAMERA_MODEL.transform = camera_transform;
-            DrawModel(CAMERA_MODEL, Vector3Zero(), 1.0, WHITE);
-            draw_frustums_cascade_wires(light_cascade);
-            draw_frustums_cascade(camera_cascade, CAMERA_0.position);
-        EndMode3D();
-            
-        BeginMode3D(CAMERA_0);
-            rlSetLineWidth(1.0);
-            DrawGrid(20, 1.0);
-        EndMode3D();
+            BeginMode3D(CAMERA_0);
+            {
+                draw_camera_shell(CAMERA_1_SHELL);
+                draw_frustums_cascade_wires(light_cascade);
+                draw_frustums_cascade(camera_cascade, CAMERA_0.position);
+            }
+            EndMode3D();
 
+            BeginMode3D(CAMERA_0);
+            {
+                rlSetLineWidth(1.0);
+                DrawGrid(20, 1.0);
+            }
+            EndMode3D();
+
+            if (IS_CAMERA_PICKED) {
+                BeginMode3D(CAMERA_0);
+                rgizmo_draw(GIZMO, CAMERA_0, CAMERA_1.position);
+                EndMode3D();
+            }
+
+            draw_gui();
+        }
         EndDrawing();
     }
 }
 
 static Frustum get_frustum_of_view_proj(Matrix view, Matrix proj) {
     Frustum frustum = {
-        .corners = {
-            Vector3Unproject((Vector3){-1.0, -1.0, -1.0}, proj, view),
-            Vector3Unproject((Vector3){-1.0, 1.0, -1.0},  proj, view),
-            Vector3Unproject((Vector3){1.0, 1.0, -1.0},   proj, view),
-            Vector3Unproject((Vector3){1.0, -1.0, -1.0},  proj, view),
-            Vector3Unproject((Vector3){-1.0, -1.0, 1.0},  proj, view),
-            Vector3Unproject((Vector3){-1.0, 1.0, 1.0},   proj, view),
-            Vector3Unproject((Vector3){1.0, 1.0, 1.0},    proj, view),
-            Vector3Unproject((Vector3){1.0, -1.0, 1.0},   proj, view)
-        },
+        .corners
+        = {Vector3Unproject((Vector3){-1.0, -1.0, -1.0}, proj, view),
+           Vector3Unproject((Vector3){-1.0, 1.0, -1.0}, proj, view),
+           Vector3Unproject((Vector3){1.0, 1.0, -1.0}, proj, view),
+           Vector3Unproject((Vector3){1.0, -1.0, -1.0}, proj, view),
+           Vector3Unproject((Vector3){-1.0, -1.0, 1.0}, proj, view),
+           Vector3Unproject((Vector3){-1.0, 1.0, 1.0}, proj, view),
+           Vector3Unproject((Vector3){1.0, 1.0, 1.0}, proj, view),
+           Vector3Unproject((Vector3){1.0, -1.0, 1.0}, proj, view)},
         .view = view,
-        .proj = proj
-    };
+        .proj = proj};
 
     return frustum;
 }
 
+static CameraShell create_camera_shell(Camera3D *camera) {
+    CameraShell shell = {0};
+    shell.camera = camera;
+    shell.model = CAMERA_MODEL;
+    shell.transform.scale = Vector3One();
+    shell.transform.rotation = QuaternionIdentity();
+    shell.transform.translation = shell.camera->position;
+    Vector3 dir = Vector3Subtract(shell.camera->target, shell.camera->position);
+    shell.transform.rotation = QuaternionFromVector3ToVector3(
+        (Vector3){0.0, 0.0, -1.0}, Vector3Normalize(dir)
+    );
 
-static Frustum get_frustum_of_camera(Camera3D camera, float aspect, float near, float far) {
+    return shell;
+}
+
+static Matrix get_transform_matrix(Transform transform) {
+    Vector3 t = transform.translation;
+    Vector3 s = transform.scale;
+    Quaternion q = transform.rotation;
+
+    Matrix mt = MatrixTranslate(t.x, t.y, t.z);
+    Matrix mr = QuaternionToMatrix(q);
+    Matrix ms = MatrixScale(s.x, s.y, s.z);
+    Matrix m = MatrixMultiply(ms, MatrixMultiply(mr, mt));
+
+    return m;
+}
+
+static Frustum get_frustum_of_camera(
+    Camera3D camera, float aspect, float near, float far
+) {
     Matrix view = MatrixLookAt(camera.position, camera.target, camera.up);
     Matrix proj = {0};
 
@@ -148,12 +240,17 @@ static Frustum get_frustum_of_camera(Camera3D camera, float aspect, float near, 
     return get_frustum_of_view_proj(view, proj);
 }
 
-static Frustum get_frustum_of_directional_light(Frustum camera_frustum, Vector3 light_direction) {
+static Frustum get_frustum_of_directional_light(
+    Frustum camera_frustum, Vector3 light_direction
+) {
     light_direction = Vector3Normalize(light_direction);
 
     // Calculate frustum bounding box in the light space
-    Matrix light_view = MatrixLookAt(Vector3Zero(), light_direction, (Vector3){0.0, 1.0, 0.0});
-    float min_x = FLT_MAX, min_y = FLT_MAX, min_z = FLT_MAX, max_x = -FLT_MAX, max_y = -FLT_MAX, max_z = -FLT_MAX;
+    Matrix light_view = MatrixLookAt(
+        Vector3Zero(), light_direction, (Vector3){0.0, 1.0, 0.0}
+    );
+    float min_x = FLT_MAX, min_y = FLT_MAX, min_z = FLT_MAX, max_x = -FLT_MAX,
+          max_y = -FLT_MAX, max_z = -FLT_MAX;
 
     for (int i = 0; i < 8; ++i) {
         // Project frustum to the light space
@@ -178,8 +275,11 @@ static Frustum get_frustum_of_directional_light(Frustum camera_frustum, Vector3 
     light_pos = Vector3Transform(light_pos, MatrixInvert(light_view));
 
     // Calculate frustum bounding box in the light space (now with light position known)
-    light_view = MatrixLookAt(light_pos, Vector3Add(light_pos, light_direction), (Vector3){0.0, 1.0, 0.0});
-    min_x = FLT_MAX, min_y = FLT_MAX, min_z = FLT_MAX, max_x = -FLT_MAX, max_y = -FLT_MAX, max_z = -FLT_MAX;
+    light_view = MatrixLookAt(
+        light_pos, Vector3Add(light_pos, light_direction), (Vector3){0.0, 1.0, 0.0}
+    );
+    min_x = FLT_MAX, min_y = FLT_MAX, min_z = FLT_MAX, max_x = -FLT_MAX, max_y = -FLT_MAX,
+    max_z = -FLT_MAX;
     for (int i = 0; i < 8; ++i) {
         // Project frustum to the light space
         Vector3 corner = Vector3Transform(camera_frustum.corners[i], light_view);
@@ -207,11 +307,12 @@ static FrustumsCascade get_frustums_cascade_of_camera(
         fprintf(
             stderr,
             "ERROR: Number of frustum planes must be >= 2 and <= %d, but you passed %d\n",
-            MAX_N_FRUSTUMS_IN_CASCADE + 1, n_planes
+            MAX_N_FRUSTUMS_IN_CASCADE + 1,
+            n_planes
         );
         exit(1);
     }
-    
+
     FrustumsCascade cascade = {0};
     memcpy(cascade.planes, planes, sizeof(planes[0]) * n_planes);
 
@@ -223,15 +324,16 @@ static FrustumsCascade get_frustums_cascade_of_camera(
             exit(1);
         }
 
-        cascade.frustums[cascade.n_frustums++] = get_frustum_of_camera(camera, aspect, near, far);
+        cascade.frustums[cascade.n_frustums++] = get_frustum_of_camera(
+            camera, aspect, near, far
+        );
     }
 
     return cascade;
 }
 
 static FrustumsCascade get_frustums_cascade_of_directional_light(
-    FrustumsCascade camera_frustums_cascade,
-    Vector3 light_direction
+    FrustumsCascade camera_frustums_cascade, Vector3 light_direction
 ) {
     FrustumsCascade cascade = {0};
     int n_planes = camera_frustums_cascade.n_frustums + 1;
@@ -244,10 +346,26 @@ static FrustumsCascade get_frustums_cascade_of_directional_light(
 
     for (int i = 0; i < cascade.n_frustums; ++i) {
         Frustum camera_frustum = camera_frustums_cascade.frustums[i];
-        cascade.frustums[i] = get_frustum_of_directional_light(camera_frustum, light_direction);
+        cascade.frustums[i] = get_frustum_of_directional_light(
+            camera_frustum, light_direction
+        );
     }
 
     return cascade;
+}
+
+static Vector3 get_direction_from_azimuth_attitude(
+    float azimuth_deg, float attitude_deg
+) {
+    Vector3 result;
+    double azimuth_rad = DEG2RAD * azimuth_deg;
+    double attitude_rad = DEG2RAD * attitude_deg;
+
+    result.x = cos(azimuth_rad) * cos(attitude_rad);
+    result.y = sin(azimuth_rad) * cos(attitude_rad);
+    result.z = sin(attitude_rad);
+
+    return Vector3Normalize(result);
 }
 
 static void update_free_orbit_camera(Camera3D *camera) {
@@ -282,20 +400,9 @@ static void update_free_orbit_camera(Camera3D *camera) {
     CameraMoveToTarget(camera, -mouse_wheel_move * zoom_speed);
 }
 
-static Matrix get_camera_transform(Camera3D camera) {
-    Vector3 axis;
-    float angle;
-
-    Matrix m = GetCameraViewMatrix(&camera);
-    Quaternion q = QuaternionFromMatrix(m);
-    QuaternionToAxisAngle(q, &axis, &angle);
-
-    Matrix r = MatrixRotate(axis, angle);
-    Matrix t = MatrixTranslate(camera.position.x, camera.position.y, camera.position.z);
-    Matrix s = MatrixIdentity();
-    Matrix transform = MatrixMultiply(MatrixMultiply(s, r), t);
-
-    return transform;
+static void draw_camera_shell(CameraShell shell) {
+    shell.model.transform = get_transform_matrix(shell.transform);
+    DrawModel(shell.model, Vector3Zero(), 1.0, WHITE);
 }
 
 static void draw_frustum(Frustum frustum, Color color) {
@@ -324,7 +431,7 @@ static void draw_frustum(Frustum frustum, Color color) {
 }
 
 static void draw_frustum_wires(Frustum frustum, Color color) {
-    rlSetLineWidth(2.0);
+    rlSetLineWidth(1.0);
     Vector3 *corners = frustum.corners;
     DrawLine3D(corners[0], corners[1], color);
     DrawLine3D(corners[1], corners[2], color);
@@ -369,15 +476,15 @@ static void draw_frustums_cascade(FrustumsCascade cascade, Vector3 eye) {
     // -------------------------------------------------------------------
     // Draw frustums in the order furthest -> nearest
     static Color frustum_colors[MAX_N_FRUSTUMS_IN_CASCADE] = {
-        (Color){255, 0, 0, 80},     // Red
-        (Color){0, 255, 0, 80},     // Green
-        (Color){0, 0, 255, 80},     // Blue
-        (Color){255, 255, 0, 80},   // Yellow
-        (Color){255, 0, 255, 80},   // Magenta
-        (Color){0, 255, 255, 80},   // Cyan
-        (Color){255, 128, 0, 80},   // Orange
-        (Color){128, 0, 128, 80},   // Purple
-        (Color){0, 128, 128, 80}    // Teal
+        (Color){255, 0, 0, 80},  // Red
+        (Color){0, 255, 0, 80},  // Green
+        (Color){0, 0, 255, 80},  // Blue
+        (Color){255, 255, 0, 80},  // Yellow
+        (Color){255, 0, 255, 80},  // Magenta
+        (Color){0, 255, 255, 80},  // Cyan
+        (Color){255, 128, 0, 80},  // Orange
+        (Color){128, 0, 128, 80},  // Purple
+        (Color){0, 128, 128, 80}  // Teal
     };
 
     for (int i = 0; i < nearest_frustum_idx; i++) {
@@ -388,11 +495,43 @@ static void draw_frustums_cascade(FrustumsCascade cascade, Vector3 eye) {
         draw_frustum(cascade.frustums[i], frustum_colors[i]);
     }
 
-    draw_frustum(cascade.frustums[nearest_frustum_idx], frustum_colors[nearest_frustum_idx]);
+    draw_frustum(
+        cascade.frustums[nearest_frustum_idx], frustum_colors[nearest_frustum_idx]
+    );
 }
 
 static void draw_frustums_cascade_wires(FrustumsCascade cascade) {
     for (int i = 0; i < cascade.n_frustums; ++i) {
         draw_frustum_wires(cascade.frustums[i], YELLOW);
     }
+}
+
+static void draw_gui(void) {
+    GuiPanel((Rectangle){2, 2, 220, 200}, "Controls");
+    GuiSliderBar(
+        (Rectangle){55, 35, 130, 20},
+        "Light    \nazimuth ",
+        TextFormat("%.2f", LIGHT.azimuth),
+        &LIGHT.azimuth,
+        1.0,
+        180.0
+    );
+    GuiSliderBar(
+        (Rectangle){55, 70, 130, 20},
+        "Light    \nattitude",
+        TextFormat("%.2f", LIGHT.attitude),
+        &LIGHT.attitude,
+        1.0,
+        180.0
+    );
+    GuiSliderBar(
+        (Rectangle){55, 105, 130, 20},
+        "Camera \nFOV",
+        TextFormat("%.2f", CAMERA_1.fovy),
+        &CAMERA_1.fovy,
+        1.0,
+        180.0
+    );
+
+    GuiCheckBox((Rectangle){8, 145, 20, 20}, "Pick camera", &IS_CAMERA_PICKED);
 }
