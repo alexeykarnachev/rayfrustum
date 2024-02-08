@@ -8,9 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define RAYGIZMO_IMPLEMENTATION
-#include "raygizmo.h"
-
 #define SCREEN_WIDTH 1024
 #define SCREEN_HEIGHT 768
 
@@ -47,6 +44,7 @@ static Camera3D CAMERA_0;
 static Camera3D CAMERA_1;
 static Model CAMERA_MODEL;
 
+static Matrix get_camera_transform(Camera3D camera);
 static Frustum get_frustum_of_camera(Camera3D camera, float aspect, float near, float far);
 static Frustum get_frustum_of_view_proj(Matrix view, Matrix proj);
 static Frustum get_frustum_of_directional_light(Frustum camera_frustum, Vector3 light_direction);
@@ -61,7 +59,6 @@ static FrustumsCascade get_frustums_cascade_of_directional_light(
     Vector3 light_direction
 );
 static void update_free_orbit_camera(Camera3D *camera);
-static void draw_camera(Camera3D camera);
 static void draw_frustum(Frustum frustum, Color color);
 static void draw_frustum_wires(Frustum frustum, Color color);
 static void draw_frustums_cascade(FrustumsCascade cascade, Vector3 eye);
@@ -73,7 +70,6 @@ int main(void) {
     SetTargetFPS(60);
 
     LIGHT_DIRECTION = Vector3Normalize((Vector3){0.0, 0.0, 1.0});
-
     CAMERA_MODEL = LoadModel("./resources/camera.glb");
 
     CAMERA_0.fovy = 70.0;
@@ -96,11 +92,14 @@ int main(void) {
         FrustumsCascade camera_cascade = get_frustums_cascade_of_camera(CAMERA_1, aspect, planes, 4);
         FrustumsCascade light_cascade = get_frustums_cascade_of_directional_light(camera_cascade, LIGHT_DIRECTION);
 
+        Matrix camera_transform = get_camera_transform(CAMERA_1);
+
         BeginDrawing();
         ClearBackground(CLEAR_COLOR);
 
         BeginMode3D(CAMERA_0);
-            draw_camera(CAMERA_1);
+            CAMERA_MODEL.transform = camera_transform;
+            DrawModel(CAMERA_MODEL, Vector3Zero(), 1.0, WHITE);
             draw_frustums_cascade_wires(light_cascade);
             draw_frustums_cascade(camera_cascade, CAMERA_0.position);
         EndMode3D();
@@ -283,7 +282,7 @@ static void update_free_orbit_camera(Camera3D *camera) {
     CameraMoveToTarget(camera, -mouse_wheel_move * zoom_speed);
 }
 
-static void draw_camera(Camera3D camera) {
+static Matrix get_camera_transform(Camera3D camera) {
     Vector3 axis;
     float angle;
 
@@ -291,7 +290,12 @@ static void draw_camera(Camera3D camera) {
     Quaternion q = QuaternionFromMatrix(m);
     QuaternionToAxisAngle(q, &axis, &angle);
 
-    DrawModelEx(CAMERA_MODEL, camera.position, axis, RAD2DEG * angle, Vector3One(), WHITE);
+    Matrix r = MatrixRotate(axis, angle);
+    Matrix t = MatrixTranslate(camera.position.x, camera.position.y, camera.position.z);
+    Matrix s = MatrixIdentity();
+    Matrix transform = MatrixMultiply(MatrixMultiply(s, r), t);
+
+    return transform;
 }
 
 static void draw_frustum(Frustum frustum, Color color) {
